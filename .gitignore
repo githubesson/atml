@@ -1,0 +1,14 @@
+# Compiled binaries
+/atml
+
+# Runtime data contains hosted sites and the server signing secret
+/atml-data/
+
+# Go test/build output
+*.out
+coverage.txt
+
+# Local editor and OS files
+.DS_Store
+.idea/
+.vscode/
