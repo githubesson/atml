@@ -20,7 +20,7 @@ import (
 	"atml/internal/hosting"
 )
 
-const version = "0.1.0"
+const version = "0.3.0"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -39,8 +39,12 @@ func run(args []string) error {
 	switch args[0] {
 	case "configure":
 		return runConfigure(args[1:])
+	case "list":
+		return runList(args[1:])
 	case "publish":
 		return runPublish(args[1:])
+	case "update":
+		return runUpdate(args[1:])
 	case "serve":
 		return runServe(args[1:])
 	case "version", "--version", "-version":
@@ -56,22 +60,94 @@ func run(args []string) error {
 }
 
 func printUsage() {
-	fmt.Fprintln(os.Stderr, `ATML publishes PIN-protected static HTML sites.
+	fmt.Fprintln(os.Stderr, `ATML lists, publishes, and updates PIN-protected static HTML sites.
 
 Usage:
   atml configure --server URL --token TOKEN
+  atml list [--json]
   atml publish [--title TITLE] [--json] PATH
+  atml update [--title TITLE] [--json] SITE PATH
   atml serve [options]
   atml version
 
 Run "atml <command> -h" for command-specific options.`)
 }
 
+func runList(args []string) error {
+	flags := flag.NewFlagSet("list", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	jsonOutput := flags.Bool("json", false, "emit machine-readable JSON")
+	serverOverride := flags.String("server", os.Getenv("ATML_SERVER"), "override configured server URL")
+	tokenOverride := flags.String("token", os.Getenv("ATML_TOKEN"), "override configured API token")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return errors.New("list does not accept positional arguments")
+	}
+	server, token, err := resolveClientCredentials(*serverOverride, *tokenOverride)
+	if err != nil {
+		return err
+	}
+	result, err := client.ListSites(server, token)
+	if err != nil {
+		return err
+	}
+	if *jsonOutput {
+		encoder := json.NewEncoder(os.Stdout)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(result)
+	}
+	if len(result.Sites) == 0 {
+		fmt.Println("No sites found.")
+		return nil
+	}
+	for _, site := range result.Sites {
+		fmt.Printf("%s\n  URL: %s\n  ID: %s\n  Created: %s\n  Files: %d (%d bytes)\n", site.Title, site.URL, site.ID, site.CreatedAt.Format(time.RFC3339), site.Files, site.Bytes)
+	}
+	return nil
+}
+
+func runUpdate(args []string) error {
+	flags := flag.NewFlagSet("update", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	title := flags.String("title", "", "new display title (preserves the current title when omitted)")
+	jsonOutput := flags.Bool("json", false, "emit machine-readable JSON")
+	serverOverride := flags.String("server", os.Getenv("ATML_SERVER"), "override configured server URL")
+	tokenOverride := flags.String("token", os.Getenv("ATML_TOKEN"), "override configured API token")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 2 {
+		return errors.New("update requires a site ID or URL and one HTML file or directory")
+	}
+	server, token, err := resolveClientCredentials(*serverOverride, *tokenOverride)
+	if err != nil {
+		return err
+	}
+	archive, err := client.CreateArchive(flags.Arg(1))
+	if err != nil {
+		return err
+	}
+	defer archive.Remove()
+	result, err := client.Update(server, token, flags.Arg(0), *title, archive)
+	if err != nil {
+		return err
+	}
+	if *jsonOutput {
+		encoder := json.NewEncoder(os.Stdout)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(result)
+	}
+	fmt.Printf("Updated %d files (%d bytes)\nURL: %s\n", result.Files, result.Bytes, result.URL)
+	return nil
+}
+
 func runConfigure(args []string) error {
 	flags := flag.NewFlagSet("configure", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	server := flags.String("server", os.Getenv("ATML_SERVER"), "ATML service base URL")
-	token := flags.String("token", firstNonEmpty(os.Getenv("ATML_TOKEN"), os.Getenv("ATML_API_TOKEN")), "publish API token")
+	token := flags.String("token", firstNonEmpty(os.Getenv("ATML_TOKEN"), os.Getenv("ATML_API_TOKEN")), "ATML API token")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -92,7 +168,7 @@ func runPublish(args []string) error {
 	title := flags.String("title", "", "display title shown on the PIN screen")
 	jsonOutput := flags.Bool("json", false, "emit machine-readable JSON")
 	serverOverride := flags.String("server", os.Getenv("ATML_SERVER"), "override configured server URL")
-	tokenOverride := flags.String("token", os.Getenv("ATML_TOKEN"), "override configured publish token")
+	tokenOverride := flags.String("token", os.Getenv("ATML_TOKEN"), "override configured API token")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -130,7 +206,7 @@ func runServe(args []string) error {
 	flags.SetOutput(os.Stderr)
 	addr := flags.String("addr", envOr("ATML_ADDR", ":8080"), "HTTP listen address")
 	dataDir := flags.String("data", envOr("ATML_DATA_DIR", "./atml-data"), "persistent data directory")
-	token := flags.String("token", firstNonEmpty(os.Getenv("ATML_API_TOKEN"), os.Getenv("ATML_TOKEN")), "required publish API token")
+	token := flags.String("token", firstNonEmpty(os.Getenv("ATML_API_TOKEN"), os.Getenv("ATML_TOKEN")), "required ATML API token")
 	publicURL := flags.String("public-url", os.Getenv("ATML_PUBLIC_URL"), "externally visible base URL")
 	maxUpload := flags.Int64("max-upload-bytes", 25<<20, "maximum compressed upload size")
 	maxSite := flags.Int64("max-site-bytes", 100<<20, "maximum expanded site size")
@@ -207,7 +283,7 @@ func resolveClientCredentials(serverOverride, tokenOverride string) (string, str
 		return "", "", err
 	}
 	if token == "" {
-		return "", "", errors.New("publish token cannot be empty")
+		return "", "", errors.New("API token cannot be empty")
 	}
 	return normalized, token, nil
 }

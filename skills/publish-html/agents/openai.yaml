@@ -1,4 +1,4 @@
 interface:
   display_name: "Publish HTML"
-  short_description: "Publish HTML through a configured ATML service"
-  default_prompt: "Use $publish-html to publish this HTML project and return its protected URL and PIN."
+  short_description: "Find, publish, or update HTML with ATML"
+  default_prompt: "Use $publish-html to find, publish, or update this HTML project through ATML."

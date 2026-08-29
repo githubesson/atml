@@ -1,6 +1,6 @@
 # ATML
 
-ATML is a small, agent-first service for publishing static HTML. An agent runs one command against a directory (or a single HTML file), and receives a URL plus a backend-generated 8-digit PIN. Visitors enter the PIN once and receive a scoped, signed browser session.
+ATML is a small, agent-first service for listing, publishing, and updating static HTML. An agent runs one command against a directory (or a single HTML file), and receives a URL plus a backend-generated 8-digit PIN. Visitors enter the PIN once and receive a scoped, signed browser session.
 
 The server and client are one dependency-free Go binary.
 
@@ -12,7 +12,7 @@ go build -o atml ./cmd/atml
 
 ## Run the server
 
-Generate a long publish token, keep it private, and put TLS in front of ATML for any public deployment:
+Generate a long API token, keep it private, and put TLS in front of ATML for any public deployment:
 
 ```sh
 export ATML_API_TOKEN="$(openssl rand -hex 32)"
@@ -70,11 +70,45 @@ Agents should request structured output:
 ./atml publish --json --title "Quarterly prototype" ./dist
 ```
 
-Each publish creates a new immutable URL and a new PIN. Publishing does not modify or replace an earlier site.
+Each publish creates a new URL and PIN.
+
+## List existing sites
+
+List every site known to the configured server when you need to find a URL from an earlier session or thread:
+
+```sh
+./atml list
+```
+
+The default output includes each site's title, URL, ID, creation time, and size. Agents should use structured output:
+
+```sh
+./atml list --json
+```
+
+Listing uses the configured API token and does not expose site PINs. The underlying API is `GET /api/v1/sites`; results are ordered newest first.
+
+## Update an existing site
+
+Use either the site URL returned by `publish` or its 16-character ID. If the original thread is unavailable, use `atml list` to recover the URL first. Updating replaces the site's complete file set while preserving its URL, PIN, and existing browser sessions. Files omitted from the new source are removed. The current title is preserved unless `--title` is supplied.
+
+```sh
+./atml update https://html.example.com/s/kx7n2m4pq6rstuva/ ./dist
+```
+
+To change the PIN-screen title at the same time:
+
+```sh
+./atml update --title "Revised quarterly prototype" kx7n2m4pq6rstuva ./dist
+```
+
+For structured output, add `--json`. The update response does not contain the PIN because ATML stores only its keyed verifier; continue using the PIN returned by the original publish.
+
+The underlying API is `PUT /api/v1/sites/<site-id>` with the same bearer authorization, gzip archive format, title header, and upload limits as publishing. Updates are staged and validated before the existing site is replaced, so a rejected upload leaves the current version intact.
 
 ## Security model
 
-- Uploads require a constant-time-checked bearer token.
+- Listing, publishing, and updating require a constant-time-checked bearer token.
 - PINs come from the operating system's cryptographic random source and always contain exactly 8 digits, including possible leading zeroes.
 - Only a keyed verifier is stored for a PIN; the plaintext PIN is returned once in the publish response.
 - Failed PIN attempts are limited to five per site and source IP in a ten-minute window.
@@ -88,4 +122,4 @@ When ATML is reachable only through a trusted reverse proxy, enable `--trust-pro
 
 ## Agent skill
 
-The repository includes [`skills/publish-html`](skills/publish-html/SKILL.md). Install or expose that folder to an agent after installing and configuring the `atml` binary. The skill tells the agent how to prepare a static artifact, publish it, and return the URL and PIN cleanly.
+The repository includes [`skills/publish-html`](skills/publish-html/SKILL.md). Install or expose that folder to an agent after installing and configuring the `atml` binary. The skill tells the agent how to find existing sites across threads, prepare static artifacts, and publish or update them safely.

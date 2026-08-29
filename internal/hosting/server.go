@@ -23,6 +23,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -62,6 +63,7 @@ type Server struct {
 	secret         []byte
 	logger         *log.Logger
 	attempts       *pinAttempts
+	sitesMu        sync.RWMutex
 }
 
 type siteMetadata struct {
@@ -80,6 +82,27 @@ type publishResponse struct {
 	Title string `json:"title"`
 	Files int    `json:"files"`
 	Bytes int64  `json:"bytes"`
+}
+
+type updateResponse struct {
+	ID    string `json:"id"`
+	URL   string `json:"url"`
+	Title string `json:"title"`
+	Files int    `json:"files"`
+	Bytes int64  `json:"bytes"`
+}
+
+type siteSummary struct {
+	ID        string    `json:"id"`
+	URL       string    `json:"url"`
+	Title     string    `json:"title"`
+	CreatedAt time.Time `json:"created_at"`
+	Files     int       `json:"files"`
+	Bytes     int64     `json:"bytes"`
+}
+
+type listSitesResponse struct {
+	Sites []siteSummary `json:"sites"`
 }
 
 func New(cfg Config) (*Server, error) {
@@ -159,14 +182,75 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, "{\"service\":\"atml\",\"publish\":\"POST /api/v1/sites\"}\n")
+		_, _ = io.WriteString(w, "{\"service\":\"atml\",\"list\":\"GET /api/v1/sites\",\"publish\":\"POST /api/v1/sites\",\"update\":\"PUT /api/v1/sites/{id}\"}\n")
 	case r.URL.Path == "/api/v1/sites":
-		s.handlePublish(w, r)
+		s.handleSites(w, r)
+	case strings.HasPrefix(r.URL.Path, "/api/v1/sites/"):
+		s.handleUpdate(w, r)
 	case strings.HasPrefix(r.URL.Path, "/s/"):
 		s.handleSite(w, r)
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (s *Server) handleSites(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.handleListSites(w, r)
+	case http.MethodPost:
+		s.handlePublish(w, r)
+	default:
+		methodNotAllowed(w, http.MethodGet, http.MethodPost)
+	}
+}
+
+func (s *Server) handleListSites(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizedAPIRequest(r) {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		writeAPIError(w, http.StatusUnauthorized, "valid bearer token required")
+		return
+	}
+
+	s.sitesMu.RLock()
+	entries, err := os.ReadDir(s.sitesDir)
+	if err != nil {
+		s.sitesMu.RUnlock()
+		s.logger.Printf("list sites: %v", err)
+		writeAPIError(w, http.StatusInternalServerError, "could not list sites")
+		return
+	}
+	sites := make([]siteSummary, 0, len(entries))
+	for _, entry := range entries {
+		id := entry.Name()
+		if !entry.IsDir() || !validSiteID(id) {
+			continue
+		}
+		metadata, err := s.loadMetadata(id)
+		if err != nil {
+			s.logger.Printf("load metadata while listing %s: %v", id, err)
+			continue
+		}
+		sites = append(sites, siteSummary{
+			ID:        id,
+			URL:       s.siteURL(r, id),
+			Title:     metadata.Title,
+			CreatedAt: metadata.CreatedAt,
+			Files:     metadata.Files,
+			Bytes:     metadata.Bytes,
+		})
+	}
+	s.sitesMu.RUnlock()
+	sort.Slice(sites, func(i, j int) bool {
+		if sites[i].CreatedAt.Equal(sites[j].CreatedAt) {
+			return sites[i].ID < sites[j].ID
+		}
+		return sites[i].CreatedAt.After(sites[j].CreatedAt)
+	})
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(listSitesResponse{Sites: sites})
 }
 
 func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
@@ -215,7 +299,7 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadRequest, "invalid upload: "+err.Error())
 		return
 	}
-	if _, err := os.Stat(filepath.Join(contentDir, "index.html")); err != nil {
+	if info, err := os.Stat(filepath.Join(contentDir, "index.html")); err != nil || !info.Mode().IsRegular() {
 		writeAPIError(w, http.StatusBadRequest, "archive must contain index.html at its root")
 		return
 	}
@@ -243,7 +327,10 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	finalPath := filepath.Join(s.sitesDir, id)
-	if err := os.Rename(stage, finalPath); err != nil {
+	s.sitesMu.Lock()
+	err = os.Rename(stage, finalPath)
+	s.sitesMu.Unlock()
+	if err != nil {
 		s.logger.Printf("commit site: %v", err)
 		writeAPIError(w, http.StatusInternalServerError, "could not save site")
 		return
@@ -264,7 +351,139 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(response)
 }
 
+func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		methodNotAllowed(w, http.MethodPut)
+		return
+	}
+	if !s.authorizedAPIRequest(r) {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		writeAPIError(w, http.StatusUnauthorized, "valid bearer token required")
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, "/api/v1/sites/")
+	if !validSiteID(id) {
+		http.NotFound(w, r)
+		return
+	}
+	contentType := strings.ToLower(strings.TrimSpace(strings.Split(r.Header.Get("Content-Type"), ";")[0]))
+	if contentType != "application/gzip" && contentType != "application/x-gzip" {
+		writeAPIError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/gzip")
+		return
+	}
+	title, err := validateTitle(r.Header.Get("X-ATML-Title"))
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	s.sitesMu.RLock()
+	_, err = s.loadMetadata(id)
+	s.sitesMu.RUnlock()
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			s.logger.Printf("load metadata for update %s: %v", id, err)
+		}
+		http.NotFound(w, r)
+		return
+	}
+
+	stage, err := os.MkdirTemp(s.tmpDir, "update-*")
+	if err != nil {
+		s.logger.Printf("create update staging directory: %v", err)
+		writeAPIError(w, http.StatusInternalServerError, "could not stage update")
+		return
+	}
+	keepStage := false
+	defer func() {
+		if !keepStage {
+			_ = os.RemoveAll(stage)
+		}
+	}()
+	contentDir := filepath.Join(stage, "files")
+	if err := os.Mkdir(contentDir, 0o700); err != nil {
+		s.logger.Printf("create update content staging directory: %v", err)
+		writeAPIError(w, http.StatusInternalServerError, "could not stage update")
+		return
+	}
+
+	limitedBody := http.MaxBytesReader(w, r.Body, s.maxUploadBytes)
+	files, bytesWritten, err := extractArchive(limitedBody, contentDir, s.maxSiteBytes, s.maxFiles)
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid upload: "+err.Error())
+		return
+	}
+	if info, err := os.Stat(filepath.Join(contentDir, "index.html")); err != nil || !info.Mode().IsRegular() {
+		writeAPIError(w, http.StatusBadRequest, "archive must contain index.html at its root")
+		return
+	}
+	metadata, err := s.replaceSite(id, stage, title, files, bytesWritten)
+	if err != nil {
+		s.logger.Printf("commit update for %s: %v", id, err)
+		writeAPIError(w, http.StatusInternalServerError, "could not save update")
+		return
+	}
+	keepStage = true
+
+	response := updateResponse{
+		ID:    id,
+		URL:   s.siteURL(r, id),
+		Title: metadata.Title,
+		Files: files,
+		Bytes: bytesWritten,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(response)
+}
+
+func (s *Server) replaceSite(id, stage, title string, files int, bytesWritten int64) (siteMetadata, error) {
+	backup, err := os.MkdirTemp(s.sitesDir, ".update-"+id+"-*")
+	if err != nil {
+		return siteMetadata{}, err
+	}
+	if err := os.Remove(backup); err != nil {
+		return siteMetadata{}, err
+	}
+
+	finalPath := filepath.Join(s.sitesDir, id)
+	s.sitesMu.Lock()
+	metadata, err := s.loadMetadata(id)
+	if err != nil {
+		s.sitesMu.Unlock()
+		return siteMetadata{}, err
+	}
+	if title != "" {
+		metadata.Title = title
+	}
+	metadata.Files = files
+	metadata.Bytes = bytesWritten
+	if err := writeMetadata(filepath.Join(stage, "site.json"), metadata); err != nil {
+		s.sitesMu.Unlock()
+		return siteMetadata{}, err
+	}
+	if err := os.Rename(finalPath, backup); err != nil {
+		s.sitesMu.Unlock()
+		return siteMetadata{}, err
+	}
+	if err := os.Rename(stage, finalPath); err != nil {
+		if rollbackErr := os.Rename(backup, finalPath); rollbackErr != nil {
+			s.sitesMu.Unlock()
+			return siteMetadata{}, fmt.Errorf("commit update: %w (rollback failed: %v)", err, rollbackErr)
+		}
+		s.sitesMu.Unlock()
+		return siteMetadata{}, err
+	}
+	s.sitesMu.Unlock()
+	if err := os.RemoveAll(backup); err != nil {
+		s.logger.Printf("remove update backup for %s: %v", id, err)
+	}
+	return metadata, nil
+}
+
 func (s *Server) handleSite(w http.ResponseWriter, r *http.Request) {
+	s.sitesMu.RLock()
+	defer s.sitesMu.RUnlock()
 	rest := strings.TrimPrefix(r.URL.Path, "/s/")
 	parts := strings.SplitN(rest, "/", 2)
 	id := parts[0]
@@ -393,7 +612,8 @@ func (s *Server) serveAsset(w http.ResponseWriter, r *http.Request, id, asset st
 	if contentType := mime.TypeByExtension(filepath.Ext(diskPath)); contentType != "" {
 		w.Header().Set("Content-Type", contentType)
 	}
-	w.Header().Set("Cache-Control", "private, max-age=300")
+	w.Header().Set("Cache-Control", "private, no-cache")
+	w.Header().Set("ETag", fmt.Sprintf(`"%x-%x"`, info.ModTime().UnixNano(), info.Size()))
 	w.Header().Set("Referrer-Policy", "same-origin")
 	http.ServeContent(w, r, info.Name(), info.ModTime(), file)
 }
