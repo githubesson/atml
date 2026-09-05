@@ -7,6 +7,18 @@ description: Find, publish, or update static HTML files and site directories thr
 
 Use the installed `atml` binary. It should already have a server URL and API token saved by a one-time `atml configure` command.
 
+## Artifact design
+
+When the request also includes creating or revising the artifact, default to a compact visual explanation or useful tool. Follow the user's requested format and existing design; publishing an existing artifact alone is not a reason to redesign it.
+
+- Put the main graphic, data, or interaction near the top. Use a short title and only enough context to make it understandable; skip introductory hero sections, taglines, and marketing copy unless requested.
+- Let graphics carry the explanation: diagrams for relationships, charts for quantities, timelines for sequences, and annotated images for spatial details. Make the visual large enough to read. Decorative icons, gradients, and text inside cards do not substitute for an informative graphic.
+- Keep copy to useful labels, brief captions, and essential explanation. Remove paragraphs that repeat what the visual already shows. Preserve necessary caveats and instructions; put secondary detail in an expandable section when helpful.
+- Use simple typography, restrained color, and spacing to organize the content. Avoid oversized headings, excessive whitespace, repeated card grids, badges, shadows, and ornamental backgrounds by default. Use color to encode meaning or direct attention.
+- Add interaction when it helps the reader explore or understand the subject, such as changing an input, comparing scenarios, or inspecting a diagram. Keep controls close to what they affect.
+
+Before publishing an artifact you created or revised, check that the main idea is visible without reading several paragraphs or scrolling past an introduction. Cut decoration and duplicate copy before adding more styling.
+
 ## Publish
 
 1. Identify the exact static artifact the user intends to expose. Publish a build/output directory, not an entire repository, unless the user explicitly wants every regular file exposed.
