@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pages · ATML</title>
+<link rel="stylesheet" href="./panel/style.css">
+<script src="./panel/app.js" defer></script>
+</head>
+<body>
+<header class="topbar"><a class="brand" href="./" aria-label="ATML home">atml<span class="brand-dot">.</span></a><button id="logout" class="quiet" hidden>Sign out</button></header>
+<main>
+<section id="login" class="login-card" aria-labelledby="login-heading">
+
+<h1 id="login-heading">Sign in</h1>
+<form id="login-form">
+<label for="token">Bearer token</label>
+<input id="token" type="password" autocomplete="off" spellcheck="false" required placeholder="Paste your API token" aria-describedby="login-error">
+<button id="submit" class="primary" type="submit">Sign in <span aria-hidden="true">→</span></button>
+<p id="login-error" class="error" role="alert"></p>
+</form>
+</section>
+<section id="dashboard" hidden aria-labelledby="pages-heading">
+<div class="page-heading"><div><h1 id="pages-heading">Deployed pages</h1></div></div>
+<div class="toolbar"><div class="search-wrap"><label for="search">Find a page</label><input id="search" type="search" placeholder="Search by title or ID" autocomplete="off"></div><button id="refresh" type="button" aria-label="Refresh pages" title="Refresh pages"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5"/><path d="M20 12a8 8 0 1 0-2.3 5.7M20 12l-3-4"/></svg></button><p id="count" role="status"></p></div>
+<p id="list-error" class="error" role="alert"></p>
+<div id="pages" class="pages"></div>
+<div id="empty" class="empty" hidden><h2 id="empty-title">No pages yet</h2></div>
+</section>
+<noscript>This panel needs JavaScript to sign in and display your pages.</noscript>
+</main>
+</body>
+</html>

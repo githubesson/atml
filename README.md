@@ -37,6 +37,14 @@ Server options can be supplied as flags or environment variables:
 
 The health endpoint is `GET /healthz`.
 
+## Web panel
+
+Open the server’s root URL (for example, `https://html.example.com/`) and sign in with the same bearer token used by the CLI. You can paste either the token alone or `Bearer <token>`.
+
+The panel lists deployed pages with their title, ID, creation date, file count, and size. Search by title or ID, refresh the list, or open a page in a new tab. Use Show PIN to reveal a page’s PIN and Hide PIN to clear it. Reveal uses the bearer-protected `GET /api/v1/sites/{id}/pin` endpoint. Existing pages published before encrypted PIN storage must be unlocked once with their original PIN before reveal is available. Pages retain their existing PIN protection; the list API does not expose PINs.
+
+The token is held only in the panel’s memory, never in browser storage or URLs. Signing out or reloading clears it. The panel is embedded in the Go binary and needs no separate frontend build or server. It reuses `GET /api/v1/sites`; the root URL now serves HTML instead of the service-info JSON. `GET /healthz` is unchanged.
+
 ## Configure a client once
 
 ```sh
@@ -102,7 +110,7 @@ To change the PIN-screen title at the same time:
 ./atml update --title "Revised quarterly prototype" kx7n2m4pq6rstuva ./dist
 ```
 
-For structured output, add `--json`. The update response does not contain the PIN because ATML stores only its keyed verifier; continue using the PIN returned by the original publish.
+For structured output, add `--json`. The update response does not contain the PIN; use the panel’s Show PIN control or the PIN returned by the original publish.
 
 The underlying API is `PUT /api/v1/sites/<site-id>` with the same bearer authorization, gzip archive format, title header, and upload limits as publishing. Updates are staged and validated before the existing site is replaced, so a rejected upload leaves the current version intact.
 
@@ -110,7 +118,7 @@ The underlying API is `PUT /api/v1/sites/<site-id>` with the same bearer authori
 
 - Listing, publishing, and updating require a constant-time-checked bearer token.
 - PINs come from the operating system's cryptographic random source and always contain exactly 8 digits, including possible leading zeroes.
-- Only a keyed verifier is stored for a PIN; the plaintext PIN is returned once in the publish response.
+- PINs are stored as keyed verifiers and AES-GCM encrypted values using a key derived from the persistent server secret. Plaintext PINs are returned only at publish time or through the bearer-protected reveal endpoint; neither the list endpoint nor public pages expose them.
 - Failed PIN attempts are limited to five per site and source IP in a ten-minute window.
 - Successful unlocks use a 12-hour, HttpOnly, SameSite, site-path-scoped signed cookie. Cookies are marked Secure when the configured public URL uses HTTPS.
 - Upload extraction rejects absolute paths, traversal, links, special files, duplicates, oversized archives, excessive expanded content, and excessive file counts.

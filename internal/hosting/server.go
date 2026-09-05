@@ -67,12 +67,13 @@ type Server struct {
 }
 
 type siteMetadata struct {
-	ID        string    `json:"id"`
-	Title     string    `json:"title"`
-	PINMAC    string    `json:"pin_mac"`
-	CreatedAt time.Time `json:"created_at"`
-	Files     int       `json:"files"`
-	Bytes     int64     `json:"bytes"`
+	ID           string    `json:"id"`
+	Title        string    `json:"title"`
+	PINMAC       string    `json:"pin_mac"`
+	PINEncrypted string    `json:"pin_encrypted,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	Files        int       `json:"files"`
+	Bytes        int64     `json:"bytes"`
 }
 
 type publishResponse struct {
@@ -177,14 +178,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, "{\"status\":\"ok\"}\n")
 	case r.URL.Path == "/":
-		if r.Method != http.MethodGet && r.Method != http.MethodHead {
-			methodNotAllowed(w, http.MethodGet, http.MethodHead)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, "{\"service\":\"atml\",\"list\":\"GET /api/v1/sites\",\"publish\":\"POST /api/v1/sites\",\"update\":\"PUT /api/v1/sites/{id}\"}\n")
+		s.servePanel(w, r, "index.html")
+	case r.URL.Path == "/panel/app.js":
+		s.servePanel(w, r, "app.js")
+	case r.URL.Path == "/panel/style.css":
+		s.servePanel(w, r, "style.css")
 	case r.URL.Path == "/api/v1/sites":
 		s.handleSites(w, r)
+	case strings.HasPrefix(r.URL.Path, "/api/v1/sites/") && strings.HasSuffix(r.URL.Path, "/pin"):
+		s.handleRevealPIN(w, r)
 	case strings.HasPrefix(r.URL.Path, "/api/v1/sites/"):
 		s.handleUpdate(w, r)
 	case strings.HasPrefix(r.URL.Path, "/s/"):
@@ -313,13 +315,19 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	if title == "" {
 		title = "Published site"
 	}
+	encryptedPIN, err := s.encryptPIN(id, pin)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "could not save PIN")
+		return
+	}
 	metadata := siteMetadata{
-		ID:        id,
-		Title:     title,
-		PINMAC:    s.pinMAC(id, pin),
-		CreatedAt: time.Now().UTC(),
-		Files:     files,
-		Bytes:     bytesWritten,
+		ID:           id,
+		Title:        title,
+		PINMAC:       s.pinMAC(id, pin),
+		PINEncrypted: encryptedPIN,
+		CreatedAt:    time.Now().UTC(),
+		Files:        files,
+		Bytes:        bytesWritten,
 	}
 	if err := writeMetadata(filepath.Join(stage, "site.json"), metadata); err != nil {
 		s.logger.Printf("write site metadata: %v", err)
@@ -482,6 +490,22 @@ func (s *Server) replaceSite(id, stage, title string, files int, bytesWritten in
 }
 
 func (s *Server) handleSite(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/unlock") {
+		id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/s/"), "/unlock")
+		if !validSiteID(id) {
+			http.NotFound(w, r)
+			return
+		}
+		s.sitesMu.Lock()
+		defer s.sitesMu.Unlock()
+		metadata, err := s.loadMetadata(id)
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		s.handleUnlock(w, r, metadata)
+		return
+	}
 	s.sitesMu.RLock()
 	defer s.sitesMu.RUnlock()
 	rest := strings.TrimPrefix(r.URL.Path, "/s/")
@@ -504,10 +528,6 @@ func (s *Server) handleSite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	asset := parts[1]
-	if asset == "unlock" && r.Method == http.MethodPost {
-		s.handleUnlock(w, r, metadata)
-		return
-	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		methodNotAllowed(w, http.MethodGet, http.MethodHead)
 		return
@@ -542,6 +562,11 @@ func (s *Server) handleUnlock(w http.ResponseWriter, r *http.Request, metadata s
 		s.servePINPage(w, http.StatusUnauthorized, metadata, true)
 		return
 	}
+	if metadata.PINEncrypted == "" {
+		if err := s.rememberPIN(metadata, pin); err != nil {
+			s.logger.Printf("save PIN for %s: %v", metadata.ID, err)
+		}
+	}
 	s.attempts.succeeded(clientKey)
 	s.setSiteSession(w, r, metadata.ID)
 	http.Redirect(w, r, "/s/"+metadata.ID+"/", http.StatusSeeOther)
@@ -555,13 +580,18 @@ func (s *Server) servePINPage(w http.ResponseWriter, status int, metadata siteMe
 	w.WriteHeader(status)
 	errorMessage := ""
 	if invalid {
-		errorMessage = `<p class="error" role="alert">That PIN is incorrect or temporarily rate-limited.</p>`
+		errorMessage = "That PIN is incorrect or temporarily rate-limited."
 	}
+	// Inline the embedded panel stylesheet so the gate shares its design without
+	// requiring scripts or depending on the site's asset paths.
+	styles, _ := panelFiles.ReadFile("panel/style.css")
 	page := `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>PIN required · ` + html.EscapeString(metadata.Title) + `</title>
-<style>html{color-scheme:light dark;font:16px system-ui,sans-serif}body{display:grid;min-height:100vh;margin:0;place-items:center;background:#111827;color:#f9fafb}.card{width:min(22rem,calc(100% - 3rem));padding:2rem;border:1px solid #374151;border-radius:1rem;background:#1f2937;box-shadow:0 1rem 3rem #0006}h1{margin:0 0 .5rem;font-size:1.35rem}p{color:#d1d5db}.error{color:#fca5a5}label{display:block;margin:1.25rem 0 .4rem}input,button{box-sizing:border-box;width:100%;padding:.8rem;border-radius:.55rem;font:inherit}input{border:1px solid #6b7280;background:#111827;color:#fff;letter-spacing:.25em;text-align:center}button{margin-top:.8rem;border:0;background:#60a5fa;color:#07111f;font-weight:700;cursor:pointer}</style></head>
-<body><main class="card"><h1>` + html.EscapeString(metadata.Title) + `</h1><p>This site is protected. Enter its 8-digit PIN to continue.</p>` + errorMessage + `<form method="post" action="/s/` + metadata.ID + `/unlock"><label for="pin">PIN</label><input id="pin" name="pin" type="password" inputmode="numeric" pattern="[0-9]{8}" minlength="8" maxlength="8" autocomplete="one-time-code" required autofocus><button type="submit">Open site</button></form></main></body></html>`
+<style>` + string(styles) + `</style></head>
+<body><header class="topbar"><span class="brand">atml<span class="brand-dot">.</span></span></header>
+<main><section class="login-card pin-entry" aria-labelledby="page-title"><h1 id="page-title">` + html.EscapeString(metadata.Title) + `</h1>
+<form method="post" action="/s/` + metadata.ID + `/unlock"><label for="pin">PIN</label><input id="pin" name="pin" type="password" inputmode="numeric" pattern="[0-9]{8}" minlength="8" maxlength="8" autocomplete="one-time-code" placeholder="8-digit PIN" aria-describedby="pin-error" required autofocus><button class="primary" type="submit">Open page <span aria-hidden="true">→</span></button><p id="pin-error" class="error" role="alert">` + errorMessage + `</p></form></section></main></body></html>`
 	_, _ = io.WriteString(w, page)
 }
 
